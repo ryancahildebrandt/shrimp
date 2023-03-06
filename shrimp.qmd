@@ -1,0 +1,160 @@
+---
+title: "The Past, Present, and Future of Shrimp and Their Rice Frying Proclivities"
+author: "Ryan Hildebrandt"
+format: html
+theme: darkly
+embed-resources: true
+date: 2023-03-05
+toc: true
+df-print: paged
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r}
+#| label: Imports
+#| echo: false
+#| include: false
+
+library(bsts)
+library(tidyverse)
+library(stats)
+```
+
+------------------------------------------------------------------------
+
+# Readin
+
+I pulled the present data from [this](https://github.com/compstorylab/storywrangling) project in the form of daily twitter occurrences for a handful of potentially relevant ngrams, but ended up focusing on "shrimp fried this" and "fried this rice". The API is limited to trigram inputs, so I split up the classic "shrimp fried this rice" target phrase into 2 parts to get as accurate a count as possible using only trigrams. From there, I decided to use the odds metric from the API as it allows for a relative proportion of tweets containing the target ngrams (rather than absolute counts). I took the log of those odds to even out the wide range of odds values, and took the mean of the two target trigrams to get an estimate of how frequent "shrimp fried this rice" actually is on The Twitter. Finally, I limited the date range to where there were notable occurrences of the target ngrams, which only really appeared after 2018.
+
+```{r}
+#| label: Data Readin
+#| echo: false
+#| cache: true
+#| 
+sfr_df = read_csv("./data/sfr.csv") %>% 
+	rename(., "date" = "...1") %>%
+	mutate(., 
+		   date = as.Date(date),
+		   odds = na.fill(odds, 1), 
+		   count = na.fill(count, 0)
+		   ) %>% 
+	filter(., 
+		   ngram %in% c("shrimp fried this", "fried this rice"), 
+		   date >= date("2018-01-01")
+		   ) %>% 
+	group_by(., date) %>% 
+	summarise(., 
+			  logodds = log(mean(odds)),
+			  count = mean(count)
+			  )
+```
+
+```{r}
+sfr_df
+```
+
+------------------------------------------------------------------------
+
+# Data Preview
+
+The log odds plot may be a bit hard to make sense of, due to the interpretation of log odds generally being more complex than the simple number of occurrences. For clarity, I'll include both plots below. The counts plot shows a little more clearly where there are spikes in the data and gives perhaps a better idea of the overall trend.
+
+```{r}
+#| label: Logodds Plot
+#| echo: true
+#| fig-cap: "Logodds and counts over time"
+
+ggplot(sfr_df, aes(x = date, y = logodds)) + 
+	geom_line()
+ggplot(sfr_df, aes(x = date, y = count)) + 
+	geom_line()
+```
+
+------------------------------------------------------------------------
+
+# Time Series Decomposition
+
+Applying Seasonal Trend Loess decomposition, we see a peak in the time series trend late 2019-early 2020. We see some reasonably consistent seasonality as well, that seems to contribute a decent amount to the variation in the data. Intuitively, very little in the twittersphere lasts more than a week so we'll assume there isn't much of a point in adding seasonality over a week.
+
+```{r}
+#| label: STL Decomposition
+#| echo: true
+#| fig-cap: "Seasonal, trend. and remainder decomposition"
+
+sfr_df$logodds %>% ts(., frequency = 365) %>% stl(., s.window = "per") %>% plot(.)
+```
+
+------------------------------------------------------------------------
+
+# Forecasting Model
+
+For the model specification, I decided on the following:
+
+-   An autoregressive component to capture recurring patterns in the data, where future values may be related to past values
+
+-   A local level component to help capture the time series trend, which assumes the data changes according to a random walk over time
+
+-   A weekly seasonal component to capture trends repeating on a weekly basis, such as tweet frequency increasing on weekends.
+
+I also played around with monthly, quarterly, and annual seasonality components, but because of lack of theoretical justification and model size constraints I decided to limit the seasonality to weekly.
+
+```{r}
+#| label: Model Components
+#| echo: true
+#| fig-cap: "Model summary"
+#| cache: true
+
+model_components <- list()
+model_components <- AddAutoAr(model_components, y = sfr_df$logodds)
+model_components <- AddLocalLevel(model_components, y = sfr_df$logodds)
+model_components <- AddSeasonal(model_components, y = sfr_df$logodds, nseasons = 52, season.duration = 7)
+summary(model_components)
+fit <- bsts(sfr_df$logodds, model_components, niter = 1000)
+```
+
+------------------------------------------------------------------------
+
+# Model Examination
+
+Looking at the residual plot, the model seems to predict fairly well the variation in the data. There seems to be pretty good accuracy on the timescale end of things, though the magnitude of tweet spikes is a little harder to account for. The general trend in the data captures what we intuitively see from the initial data plot, with a spike in late 2019-early 2020 as well as another smaller uptick in early 2022. The model's seasonality looks to be a good fit for the data, as the pattern of weekly changes in the data seems consistent when they're removed from the trend component.
+
+```{r}
+#| label: Fit Plots
+#| echo: true
+#| fig-cap: "Residual, component, prediction error plots"
+
+plot(fit)
+plot(fit, "residuals")
+plot(fit, "components")
+plot(fit, "prediction.errors")
+```
+
+Diving deeper into the contributions plots for each of the model components, the autoregressive component comes out as the highest contributor to model predictions. This intuitively makes sense in the sense that once someone decides to tweet or retweet something, its audience grows and ripples throughout the twittersphere, inspiring more and more tweets on the topic.
+
+```{r}
+#| label: Model Component Contributions
+#| echo: true
+#| fig-cap: "Autoregressive, trend, and weekly seasonal component contributions"
+
+plot(colMeans(fit$state.contributions[,"Ar1",]))
+plot(colMeans(fit$state.contributions[,"trend",]))
+plot(colMeans(fit$state.contributions[,"seasonal.52.7",]))
+```
+
+------------------------------------------------------------------------
+
+# Conclusion
+
+While the model seems to fit the data relatively well, our predictions from the model cover a fairly wide range of values at 95% confidence. This is likely due to the spikes in tweet frequency being difficult to predict. They don't seem to have reliable precursors included in the present dataset, and considering the ephemeral, uncapturable nature of someone tweeting "so you're telling me a shrimp fried this rice" whenever the urge may arise, this is not surprising.
+
+That being said, the predicted trend line does indicate some spikes in the next 180 days, and with the time of forecasting that would put a resurgence of "shrimp fried this rice" tweets in late Summer-early Fall, 2023. I, for one, will be awaiting this resurgence with the utmost excitement.
+
+```{r}
+#| label: Model Predictions
+#| echo: true
+#| fig-cap: "Logodds predictions for 180 days"
+
+pred <- predict(fit, horizon = 180, quantiles = c(.05, .95))
+plot(pred)
+```
